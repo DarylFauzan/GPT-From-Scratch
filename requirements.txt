@@ -1,0 +1,9 @@
+pandas
+numpy
+matplotlib
+seaborn
+PyMuPDF
+torch
+transformers
+langchain
+langchain-community
