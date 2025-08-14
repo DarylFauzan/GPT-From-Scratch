@@ -55,6 +55,6 @@ model = JeroGPT(model_config).to(device)
 
 # define the trainer
 trainer_config = TrainConfig()
-trainer = PretrainedTrainer(model, trainer_config, train_dataset, val_dataset, task = "binary", device = device)
+trainer = PretrainedTrainer(model, trainer_config, train_dataset, val_dataset, device = device)
 
 trainer.train()
