@@ -1,6 +1,6 @@
 # create classification trainer
 # train the model
-import torch, math
+import torch, math, os
 from torch import nn
 from torch.nn import functional as F
 from torch.optim import AdamW
@@ -36,7 +36,7 @@ class TrainConfig:
     report_path: str = "model/reports"
     epochs: int = 50
     num_warmup_steps: int = 5
-    batch_size: int = 32
+    batch_size: int = 16
     num_workers: int = 0
     learning_rate: float = 3e-4
     weight_decay: float = 0
@@ -118,6 +118,7 @@ class PretrainedTrainer():
         logger.addHandler(handler)
         
         # file handler
+        os.makedirs(os.path.dirname(f"{self.report_path}/log.log"), exist_ok=True)
         file_handler = logging.FileHandler(f"{self.report_path}/log.log")
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
