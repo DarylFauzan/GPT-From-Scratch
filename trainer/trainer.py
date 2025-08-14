@@ -1,30 +1,71 @@
-import torch
+# create classification trainer
+# train the model
+import torch, math
 from torch import nn
 from torch.nn import functional as F
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
+from torch.optim.lr_scheduler import LambdaLR
 
-import numpy as np
-from tqdm import tqdm
 import matplotlib.pyplot as plt
 import seaborn as sns
+from torchmetrics import F1Score
 
-class TrainConfig():
+import logging
+from tqdm import tqdm
+import time
+import dataclasses
+
+torch.autograd.set_detect_anomaly(True)
+
+# --- 1. Configure logging to work well with tqdm ---
+class TqdmLoggingHandler(logging.Handler):
+    def __init__(self, level=logging.NOTSET):
+        super().__init__(level)
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            tqdm.write(msg)
+            self.flush()
+        except Exception:
+            self.handleError(record)
+
+@dataclasses.dataclass
+class TrainConfig:
+    report_path: str = "model/reports"
     epochs: int = 50
-    batch_size: int = 16
+    num_warmup_steps: int = 5
+    batch_size: int = 32
     num_workers: int = 0
-    learning_rate: float = 2e-4
-    weight_decay: float = 0.01
+    learning_rate: float = 3e-4
+    weight_decay: float = 0
     checkpoints: int = 10 # the model every <checkpoints> epochs
 
-class PretrainedTrainer:
-    def __init__(self, model, training_config, train_dataset, val_dataset, task = "binary", device = "cuda"):
+# Create Cosine LR Scheduler
+def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps, num_cycles=0.5, last_epoch=-1):
+    """
+    Create a schedule with a learning rate that increases linearly during warmup,
+    then decreases following a cosine function.
+    """
+    def lr_lambda(current_step):
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        # progress after warmup [0, 1]
+        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * num_cycles * 2.0 * progress)))
+    
+    return LambdaLR(optimizer, lr_lambda, last_epoch)
+
+
+class PretrainedTrainer():
+    def __init__(self, model, training_config, train_dataset, val_dataset, device = "cuda"):
         """This is the training function. Here are some of the parameters:
     
         1. model: your Pytorch model.
         2. train_dataset: Your dataset for training (pytorch.utils.data.Dataset).
         3. val_dataset: Your dataset for validation (pytorch.utils.data.Dataset).
-        4. training_config: Fill the training config with the TrainConfig class.
+        4. training_config: Fill the training config with the TrainConfig class
         """
         assert task in {"binary", "multiclass"}, "task only accept binary or multiclass"
         # define the training config
@@ -35,25 +76,25 @@ class PretrainedTrainer:
         self.batch_size = training_config.batch_size
         self.num_workers = training_config.num_workers
         self.checkpoints = training_config.checkpoints
+        self.report_path = training_config.report_path
         self.device = device
 
-        # define the criterion
-        if task == "binary":
-            self.criterion = nn.BCEWithLogitsLoss().to(device)
-        else:
-            self.criterion = nn.CrossEntropyLoss().to(device)
         # define the optimizers
         self.optimizer = AdamW(model.parameters(), 
                                lr = training_config.learning_rate,
                                weight_decay = training_config.weight_decay)
+        #define scheduler
+        self.scheduler = get_cosine_schedule_with_warmup(self.optimizer, training_config.num_warmup_steps, self.epochs)
 
-    def create_report_plot(self, loss_train, loss_val, f1_train, f1_val):
+        # initiate logger
+        self.log = self.logger()
+
+    # Create report plot
+    def create_report_plot(self, loss_train, loss_val):
         x = [i for i in range(1, self.epochs + 1)]
 
         metrics = {"Train_Loss": loss_train,
-               "Val_Loss": loss_val,
-               "Train_F1Score": f1_train,
-               "Val_F1Score": f1_val}
+               "Val_Loss": loss_val}
 
         # Create plot for each metric
         for key in metrics.keys():
@@ -64,8 +105,24 @@ class PretrainedTrainer:
             plt.xlabel("epochs")
             plt.ylabel(f"key")
 
-            fig.savefig(f"model/reports/plots/{key}.png", dpi = 600)
-    
+            fig.savefig(f"{self.report_path}/plots/{key}.png", dpi = 600)
+
+    #create logging
+    def logger(self):
+        logger = logging.getLogger(__name__)
+        logger.setLevel(logging.INFO)
+        
+        # Add custom tqdm logging handler
+        handler = TqdmLoggingHandler()
+        formatter = logging.Formatter("%(message)s, %(asctime)s")
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        
+        # file handler
+        file_handler = logging.FileHandler(f"{self.report_path}/log.log")
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        return logger
 
     def train(self):
         # create dataloader
@@ -82,65 +139,59 @@ class PretrainedTrainer:
         
         loss_train = []
         loss_val = []
-
-        f1_train = []
-        f1_val = []
-        print(f"""
+        self.log.info(f"""
  ||  ||  
  \\()// 
 //(__)\\
 ||    ||
 Trainable Parameters = {sum(p.numel() for p in self.model.parameters() if p.requires_grad):d} / {sum(p.numel() for p in self.model.parameters())}
 Start Training 🧠...""")
-        with open("model/reports/log.txt", "w") as f:
-            for epoch in range(self.epochs):
-                epoch_train_loss, epoch_val_loss = 0, 0
-                # Add tqdm wrapper
-                with tqdm(train_loader, desc=f"Epoch {epoch+1}/{self.epochs}") as pbar:
-                    # train the model
-                    self.model.train()
-                    for x, y in pbar:
-                        self.optimizer.zero_grad()
-                        # create prediction and compute loss
-                        _y, loss = self.model(x, y)
-                        loss.backward()
-                        self.optimizer.step()
-    
-                        # add the training loss
-                        epoch_train_loss += loss.item()
-                        pbar.set_postfix(train_loss=loss.item())
-    
-                # compute the validation set
-                self.model.eval()
-                for x, y in val_loader:
-                    _y = self.model(x) 
-                    loss = self.criterion(_y, y)
-    
-                    # add the validation loss
-                    epoch_val_loss += loss.item()
-    
-                # compute the average of loss and metrics in one epoch
-                avg_epoch_train_loss = epoch_train_loss / len(train_loader)
-                avg_epoch_val_loss = epoch_val_loss / len(val_loader)
-    
-                # append it to the log
-                loss_train.append(avg_epoch_train_loss)
-                loss_val.append(avg_epoch_val_loss)
-    
-                # Display validation loss after tqdm loop ends
-                summary = f"Epoch {epoch+1}/{self.epochs}: train_loss = {avg_epoch_train_loss:4f}, val_loss = {avg_epoch_val_loss:4f}"
-                print(summary)
+        for epoch in range(self.epochs):
+            epoch_train_loss, epoch_val_loss = 0, 0
+            epoch_train_f1, epoch_val_f1 = 0, 0
+            # Add tqdm wrapper
+            pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{self.epochs}")
+            # train the model
+            self.model.train()
+            for x, y in pbar:
+                x, y = x.to(self.device), y.to(self.device)
+                self.optimizer.zero_grad()
+                # create prediction
+                _y, loss = self.model(x, y)
 
-                f.write(summary)
+                loss.backward()
+                self.optimizer.step()
+                self.scheduler.step()
 
-                # checkpoints
-                if epoch % self.checkpoints == 0:
-                    torch.save(self.model.state_dict(), 
-                               f"model/reports/checkpoints/_{epoch//self.checkpoints}_Jerro.pth") 
+                # add the training loss
+                epoch_train_loss += loss.item()
+                pbar.set_postfix(train_loss=loss.item())
+
+            # compute the validation set
+            self.model.eval()
+            for x, y in val_loader:
+                x, y = x.to(self.device), y.to(self.device)
+                _y, loss = self.model(x, y) 
+
+                # add the validation loss
+                epoch_val_loss += loss.item()
+
+            # compute the average of loss and metrics in one epoch
+            avg_epoch_train_loss = epoch_train_loss / len(train_loader)
+            avg_epoch_val_loss = epoch_val_loss / len(val_loader)
+
+            # append it to the log
+            loss_train.append(avg_epoch_train_loss)
+            loss_val.append(avg_epoch_val_loss)
+
+            # Display validation loss after tqdm loop ends
+            pbar.set_postfix(train_loss = avg_epoch_train_loss, val_loss = avg_epoch_val_loss)
+            self.log.info(str(pbar))
+
+            # checkpoints
+            if epoch + 1 % self.checkpoints == 0:
+                torch.save(self.model.state_dict(), 
+                           f"{self.report_path}/checkpoints/_{epoch//self.checkpoints}.pth") 
         
         # Create plot after training
-        self.create_report_plot(loss_train, loss_val, f1_train, f1_val)
-
-        # Save the final model
-        torch.save(self.model.state_dict(), 
-                    f"model/JerroSentimentAnalysis.pth") 
+        self.create_report_plot(loss_train, loss_val)

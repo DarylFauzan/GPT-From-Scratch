@@ -34,7 +34,7 @@ class MultiHeadAttention(nn.Module):
         v = v.view(B, T, self.num_heads, C//self.num_heads).transpose(1,2) # (B, nh, T, c/nh)
 
         # multiply q and k.T
-        qk = torch.matmul(q, k.transpose(-1, -2)) / (self.embd_dim ** -0.5) # (B, nh, T, T)
+        qk = torch.matmul(q, k.transpose(-1, -2)) / ((C//self.num_heads) ** 0.5) # (B, nh, T, T)
 
         # encoder or decoder, if decoder, perform future masking
         if decoder:
