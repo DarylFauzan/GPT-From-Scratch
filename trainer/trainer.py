@@ -67,7 +67,6 @@ class PretrainedTrainer():
         3. val_dataset: Your dataset for validation (pytorch.utils.data.Dataset).
         4. training_config: Fill the training config with the TrainConfig class
         """
-        assert task in {"binary", "multiclass"}, "task only accept binary or multiclass"
         # define the training config
         self.model = model.to(device)
         self.train_dataset = train_dataset
